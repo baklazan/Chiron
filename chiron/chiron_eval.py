@@ -300,11 +300,32 @@ def build_eval_graph(model_configure):
             if not os.path.exists(os.path.join(FLAGS.output, 'meta')):
                 os.makedirs(os.path.join(FLAGS.output, 'meta'))
 
+            self.logits_dir = os.path.join(FLAGS.output, 'logits')
+            if not os.path.exists(self.logits_dir):
+                os.makedirs(self.logits_dir)
+            self.current_logits_filename = None
+
+        def write_logits(self, logits, logits_fn, seq_len):
+            for segment, fn, end_index in zip(logits, logits_fn, map(int,seq_len)):
+                if fn == '': # We have reached padding in the last batch
+                    break
+                start_index = FLAGS.segment_len - FLAGS.jump
+                if fn != self.current_logits_filename:
+                    if self.current_logits_filename is not None:
+                        self.current_logits_file.close()
+                    self.current_logits_filename = fn
+                    path = os.path.join(self.logits_dir, self.current_logits_filename)
+                    self.current_logits_file = open(path, 'w')
+                    start_index = 0
+                for line in segment[start_index : end_index]:
+                    self.current_logits_file.write('{}\n'.format('\t'.join(map(str, line))))
+
         def _worker_fn(self):
             batch_x = np.asarray([[]]).reshape(0,FLAGS.segment_len)
             seq_len = np.asarray([])
             logits_idx = np.asarray([])
             logits_fn = np.asarray([])
+
             for f_i, name in enumerate(self.file_list):
                 if not name.endswith('.signal'):
                     continue
@@ -336,7 +357,9 @@ def build_eval_graph(model_configure):
                         self.logits_index.name:logits_idx,
                         self.logits_fname.name:logits_fn,
                     }
-                    self.sess.run(self.logits_enqueue,feed_dict=feed_dict)
+                    _, logits_values = self.sess.run([self.logits_enqueue, self.logits],feed_dict=feed_dict)
+                    self.write_logits(logits_values, logits_fn, seq_len)
+
                     batch_x = np.asarray([[]]).reshape(0,FLAGS.segment_len)
                     seq_len = np.asarray([])
                     logits_idx = np.asarray([])
@@ -355,17 +378,21 @@ def build_eval_graph(model_configure):
                         seq_len, ((0, pad_width)), mode='wrap')
                 logits_idx = np.pad(logits_idx,(0,pad_width),mode = 'constant',constant_values=-1)
                 logits_fn = np.pad(logits_fn,(0,pad_width),mode = 'constant',constant_values='')
-                self.sess.run(self.logits_enqueue,feed_dict = {
-                        self.x.name: batch_x,
-                        self.seq_length.name: np.round(seq_len/self.ratio).astype(np.int32),
-                        self.training.name: False,
-                        self.logits_index.name:logits_idx,
-                        self.logits_fname.name:logits_fn,
-                    })
+                feed_dict = feed_dict = {
+                    self.x.name: batch_x,
+                    self.seq_length.name: np.round(seq_len/self.ratio).astype(np.int32),
+                    self.training.name: False,
+                    self.logits_index.name:logits_idx,
+                    self.logits_fname.name:logits_fn,
+                }
+                _, logits_values = self.sess.run([self.logits_enqueue, self.logits], feed_dict=feed_dict)
+                self.write_logits(logits_values, logits_fn, seq_len)
             self.sess.run(self.logits_queue_close)
+            if self.current_logits_filename is not None:
+                self.current_logits_file.close()
         def run_worker(self):
             worker = threading.Thread(target=self._worker_fn)
-            worker.setDaemon(True)
+            worker.setDaemon(False)
             worker.start()
     eval_net = net(model_configure)
     eval_net.init_session()
